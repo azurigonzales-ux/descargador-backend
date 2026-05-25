@@ -30,7 +30,7 @@ def delete_file(path: str):
 @app.post("/descargar")
 async def descargar_video(request: VideoRequest, background_tasks: BackgroundTasks):
     # Configuración maestra de yt-dlp con todos los parches
-  ydl_opts = {
+    ydl_opts = {
         'format': 'bestvideo+bestaudio/best',
         'merge_output_format': 'mp4',
         'outtmpl': os.path.join(DOWNLOAD_DIR, '%(title).50s.%(ext)s'),
@@ -40,7 +40,6 @@ async def descargar_video(request: VideoRequest, background_tasks: BackgroundTas
         'extractor_args': {'youtube': {'player_client': ['android', 'ios']}}
     }
     
-
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             # Extraer info y descargar
