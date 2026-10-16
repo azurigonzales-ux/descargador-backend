@@ -1,13 +1,10 @@
-import os
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
 import yt_dlp
 
 app = FastAPI()
 
-# Configuración para permitir que tu Vercel se comunique con este servidor
+# Permite que Vercel se conecte con este backend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -16,50 +13,35 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DOWNLOAD_DIR = "temporal_downloads"
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
-class VideoRequest(BaseModel):
-    url: str
-
-def delete_file(path: str):
-    """Borra el video del servidor después de enviarlo para no llenar la memoria"""
-    if os.path.exists(path):
-        os.remove(path)
-
-@app.post("/descargar")
-async def descargar_video(request: VideoRequest, background_tasks: BackgroundTasks):
-    # Configuración maestra de yt-dlp con todos los parches
+@app.get("/api/descargar")
+async def descargar_video(url: str):
+    # Opciones antibloqueo para yt-dlp
     ydl_opts = {
-        'format': 'bestvideo+bestaudio/best',
-        'merge_output_format': 'mp4',
-        'outtmpl': os.path.join(DOWNLOAD_DIR, '%(title).50s.%(ext)s'),
-        'quiet': False,
-        'cookiefile': 'cookies.txt',
-        # --- ESTA ES LA LÍNEA NUEVA (El disfraz de Android/iOS) ---
-        'extractor_args': {'youtube': {'player_client': ['android', 'ios']}}
+        'format': 'best',
+        'noplaylist': True,
+        'quiet': True,
+        'no_warnings': True,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
+        }
     }
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Extraer info y descargar
-            info = ydl.extract_info(request.url, download=True)
-            filename = ydl.prepare_filename(info)
+            info = ydl.extract_info(url, download=False)
             
-            # Asegurarnos de que envíe el .mp4 final después de que FFmpeg los una
-            base, _ = os.path.splitext(filename)
-            final_filename = f"{base}.mp4"
-            
-            if not os.path.exists(final_filename):
-                final_filename = filename
+            # Buscar la mejor URL directa del archivo .mp4
+            video_url = info.get('url')
+            if not video_url and 'formats' in info:
+                mejores_formatos = [f for f in info['formats'] if f.get('vcodec') != 'none']
+                if mejores_formatos:
+                    video_url = mejores_formatos[-1].get('url')
 
-        # Programar el borrado y enviar el archivo al usuario
-        background_tasks.add_task(delete_file, final_filename)
-        return FileResponse(
-            path=final_filename, 
-            filename=os.path.basename(final_filename), 
-            media_type='video/mp4'
-        )
-
+            return {
+                "titulo": info.get('title', 'Video sin título'),
+                "url_directa": video_url,
+                "miniatura": info.get('thumbnail', ''),
+                "plataforma": info.get('extractor', 'Desconocida')
+            }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=400, detail=f"Error al procesar el video: {str(e)}")
