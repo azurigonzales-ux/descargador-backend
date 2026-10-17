@@ -1,11 +1,14 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import yt_dlp
+import httpx
+from urllib.parse import quote
+import os
 
 app = FastAPI()
 
-# Permite que Vercel se conecte con este backend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -14,13 +17,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Estructura de los datos que recibe
 class VideoRequest(BaseModel):
     url: str
 
 @app.post("/api/descargar")
-async def descargar_video(request: VideoRequest):
-    # Opciones antibloqueo para yt-dlp
+async def extraer_info(request: VideoRequest):
     ydl_opts = {
         'format': 'best',
         'noplaylist': True,
@@ -31,12 +32,14 @@ async def descargar_video(request: VideoRequest):
         }
     }
     
+    # IMPORTANTE: Esto lee el archivo de cookies para evitar el bloqueo de YouTube
+    if os.path.exists('cookies.txt'):
+        ydl_opts['cookiefile'] = 'cookies.txt'
+    
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # download=False extrae la info sin descargar el archivo pesado en Render
             info = ydl.extract_info(request.url, download=False)
             
-            # Buscar la mejor URL directa del archivo
             video_url = info.get('url')
             if not video_url and 'formats' in info:
                 formatos_validos = [f for f in info['formats'] if f.get('vcodec') != 'none' and f.get('url')]
@@ -44,9 +47,23 @@ async def descargar_video(request: VideoRequest):
                     video_url = formatos_validos[-1].get('url')
 
             return {
-                "titulo": info.get('title', 'Video sin título'),
+                "titulo": info.get('title', 'Video'),
                 "url_directa": video_url,
                 "miniatura": info.get('thumbnail', '')
             }
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error al procesar el video: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/api/forzar-descarga")
+async def forzar_descarga(url: str, titulo: str = "video"):
+    """Este endpoint puentea el video para obligar al celular a descargarlo."""
+    async def stream_video():
+        async with httpx.AsyncClient() as client:
+            async with client.stream("GET", url, follow_redirects=True) as response:
+                async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
+                    yield chunk
+
+    headers = {
+        'Content-Disposition': f'attachment; filename="{quote(titulo)}.mp4"'
+    }
+    return StreamingResponse(stream_video(), media_type="video/mp4", headers=headers)
