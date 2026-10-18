@@ -5,12 +5,10 @@ from pydantic import BaseModel
 import yt_dlp
 import os
 import uuid
-import shutil
 import re
 
 app = FastAPI()
 
-# Configuración CORS compatible con cualquier dominio de Vercel y móviles
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,10 +29,13 @@ def limpiar_nombre(titulo: str) -> str:
     return limpio if limpio else "video_descargado"
 
 def obtener_cookie_temp():
-    """Crea una copia temporal de cookies.txt para que yt-dlp no corrompa el original."""
-    if os.path.exists("cookies.txt"):
+    """Crea una copia temporal limpia (formato Linux LF) de cookies.txt."""
+    if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 10:
         temp_cookie = os.path.join(TEMP_DIR, f"cookie_{uuid.uuid4().hex}.txt")
-        shutil.copy("cookies.txt", temp_cookie)
+        with open("cookies.txt", "rb") as f_in:
+            contenido = f_in.read().replace(b"\r\n", b"\n")
+        with open(temp_cookie, "wb") as f_out:
+            f_out.write(contenido)
         return temp_cookie
     return None
 
@@ -46,35 +47,52 @@ def borrar_archivo(ruta: str):
         pass
 
 def ejecutar_ytdlp(url: str, opciones_base: dict, descargar: bool):
-    """Intenta con cookies primero y, si la plataforma bloquea, usa clientes móviles de respaldo."""
+    """Prueba distintas estrategias de cliente para evadir bloqueos de YouTube, X y TikTok."""
     cookie_temp = obtener_cookie_temp()
-    intentos = []
+    estrategias = []
 
-    # Intento 1: Con cookies.txt (si existe) y cliente web/móvil
-    if cookie_temp:
-        opts1 = opciones_base.copy()
-        opts1["cookiefile"] = cookie_temp
-        intentos.append(opts1)
-
-    # Intento 2: Sin cookies, emulando cliente nativo iOS/Android/Web
-    opts2 = opciones_base.copy()
-    opts2["extractor_args"] = {
+    # Estrategia 1: Clientes móviles/VR sin cookies (no sufren bloqueo SABR de IP en YouTube)
+    opts_movil = opciones_base.copy()
+    opts_movil["extractor_args"] = {
         "youtube": {
-            "player_client": ["ios", "android", "mweb", "web"]
+            "player_client": ["android_vr", "ios", "mweb", "tv_embedded"]
         }
     }
-    intentos.append(opts2)
+    estrategias.append(("Clientes Móviles/VR", opts_movil))
 
-    ultimo_error = None
+    # Estrategia 2: Con cookies.txt usando clientes TV, Creator y Mobile Web
+    if cookie_temp:
+        opts_cookies_tv = opciones_base.copy()
+        opts_cookies_tv["cookiefile"] = cookie_temp
+        opts_cookies_tv["extractor_args"] = {
+            "youtube": {
+                "player_client": ["tv", "web_creator", "mweb", "web"]
+            }
+        }
+        estrategias.append(("Cookies + TV/Creator", opts_cookies_tv))
+
+        # Estrategia 3: Con cookies.txt estándar (ideal para X/Twitter, TikTok, Instagram)
+        opts_cookies_std = opciones_base.copy()
+        opts_cookies_std["cookiefile"] = cookie_temp
+        estrategias.append(("Cookies Estándar", opts_cookies_std))
+
+    # Estrategia 4: Estándar sin cookies (para TikTok y webs externas)
+    estrategias.append(("Estándar Directo", opciones_base.copy()))
+
+    errores = []
     try:
-        for opts in intentos:
+        for nombre_est, opts in estrategias:
             try:
                 with yt_dlp.YoutubeDL(opts) as ydl:
-                    return ydl.extract_info(url, download=descargar)
+                    info = ydl.extract_info(url, download=descargar)
+                    if info:
+                        print(f"Éxito usando estrategia: {nombre_est}")
+                        return info
             except Exception as e:
-                ultimo_error = e
+                print(f"Fallo en estrategia [{nombre_est}]: {str(e)}")
+                errores.append(str(e))
                 continue
-        raise ultimo_error
+        raise Exception(errores[0] if errores else "No se pudo extraer el video.")
     finally:
         if cookie_temp:
             borrar_archivo(cookie_temp)
@@ -90,12 +108,11 @@ async def obtener_info_video(request: VideoRequest):
         return JSONResponse(status_code=400, content={"detail": "URL vacía"})
 
     ydl_opts = {
+        "format": "bestvideo*+bestaudio/best",
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        },
+        "geo_bypass": True,
     }
 
     try:
@@ -115,37 +132,37 @@ async def obtener_info_video(request: VideoRequest):
 
 @app.post("/api/preparar-archivo")
 async def preparar_archivo(request: VideoRequest):
-    """Descarga y une el video en MP4 dentro del servidor para enviarlo listo al teléfono/PC."""
     url = request.url.strip()
     file_id = uuid.uuid4().hex
     output_template = os.path.join(TEMP_DIR, f"{file_id}.%(ext)s")
 
     ydl_opts = {
-        "format": "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "format": "bestvideo*[height<=1080]+bestaudio/best[height<=1080]/bestvideo*+bestaudio/best",
         "merge_output_format": "mp4",
         "outtmpl": output_template,
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        },
+        "geo_bypass": True,
+        "postprocessors": [{
+            "key": "FFmpegVideoRemuxer",
+            "preferedformat": "mp4",
+        }],
     }
 
     try:
         info = ejecutar_ytdlp(url, ydl_opts, descargar=True)
         titulo_limpio = limpiar_nombre(info.get("title", "Video_MP4"))
 
-        # Localizar el archivo generado
         archivo_final = os.path.join(TEMP_DIR, f"{file_id}.mp4")
         if not os.path.exists(archivo_final):
             for nombre in os.listdir(TEMP_DIR):
-                if nombre.startswith(file_id):
+                if nombre.startswith(file_id) and not nombre.endswith(".txt"):
                     archivo_final = os.path.join(TEMP_DIR, nombre)
                     break
 
         if not os.path.exists(archivo_final):
-            raise Exception("El archivo de video no se pudo generar.")
+            raise Exception("El archivo de video no se pudo empaquetar.")
 
         return {
             "file_id": os.path.basename(archivo_final),
@@ -159,7 +176,6 @@ async def preparar_archivo(request: VideoRequest):
 
 @app.get("/api/bajar/{file_name}")
 async def bajar_archivo(file_name: str, nombre: str = "Video.mp4", background_tasks: BackgroundTasks = None):
-    """Entrega el archivo forzando al navegador móvil y de escritorio a guardarlo en Descargas."""
     ruta_segura = os.path.join(TEMP_DIR, os.path.basename(file_name))
     if not os.path.exists(ruta_segura):
         raise HTTPException(status_code=404, detail="El archivo expiró o no existe.")
