@@ -1,6 +1,8 @@
 fastapi
 uvicorn
 yt-dlp
+yt-dlp-ejs
 pydantic
 httpx
 curl-cffi
+pytubefix
