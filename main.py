@@ -47,37 +47,38 @@ def borrar_archivo(ruta: str):
         pass
 
 def ejecutar_ytdlp(url: str, opciones_base: dict, descargar: bool):
-    """Prueba distintas estrategias de cliente para evadir bloqueos de YouTube, X y TikTok."""
     cookie_temp = obtener_cookie_temp()
+    
+    # Habilitar explícitamente Deno y Node para que yt-dlp descifre los formatos MP4 de YouTube
+    opciones_base["js_runtimes"] = {"deno": {}, "node": {}}
+    opciones_base["remote_components"] = ["ejs:github"]
+
     estrategias = []
 
-    # Estrategia 1: Clientes móviles/VR sin cookies (no sufren bloqueo SABR de IP en YouTube)
-    opts_movil = opciones_base.copy()
-    opts_movil["extractor_args"] = {
-        "youtube": {
-            "player_client": ["android_vr", "ios", "mweb", "tv_embedded"]
-        }
-    }
-    estrategias.append(("Clientes Móviles/VR", opts_movil))
-
-    # Estrategia 2: Con cookies.txt usando clientes TV, Creator y Mobile Web
     if cookie_temp:
-        opts_cookies_tv = opciones_base.copy()
-        opts_cookies_tv["cookiefile"] = cookie_temp
-        opts_cookies_tv["extractor_args"] = {
+        # Estrategia 1: Cookies + clientes Web Safari / TV / Creator (evitan bloqueo de formato)
+        opts_1 = opciones_base.copy()
+        opts_1["cookiefile"] = cookie_temp
+        opts_1["extractor_args"] = {
             "youtube": {
-                "player_client": ["tv", "web_creator", "mweb", "web"]
+                "player_client": ["web_safari", "tv_simply", "tv", "web_creator", "mweb", "web"]
             }
         }
-        estrategias.append(("Cookies + TV/Creator", opts_cookies_tv))
+        estrategias.append(("Cookies + Multi-Cliente JS", opts_1))
 
-        # Estrategia 3: Con cookies.txt estándar (ideal para X/Twitter, TikTok, Instagram)
-        opts_cookies_std = opciones_base.copy()
-        opts_cookies_std["cookiefile"] = cookie_temp
-        estrategias.append(("Cookies Estándar", opts_cookies_std))
+        # Estrategia 2: Cookies directo (ideal para X/Twitter, TikTok, Instagram, Facebook)
+        opts_2 = opciones_base.copy()
+        opts_2["cookiefile"] = cookie_temp
+        estrategias.append(("Cookies Estándar", opts_2))
 
-    # Estrategia 4: Estándar sin cookies (para TikTok y webs externas)
-    estrategias.append(("Estándar Directo", opciones_base.copy()))
+    # Estrategia 3: Sin cookies con clientes móviles/embebidos
+    opts_3 = opciones_base.copy()
+    opts_3["extractor_args"] = {
+        "youtube": {
+            "player_client": ["ios", "android_vr", "tv_embedded", "web_safari"]
+        }
+    }
+    estrategias.append(("Clientes Móviles Sin Cookies", opts_3))
 
     errores = []
     try:
@@ -86,16 +87,49 @@ def ejecutar_ytdlp(url: str, opciones_base: dict, descargar: bool):
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(url, download=descargar)
                     if info:
-                        print(f"Éxito usando estrategia: {nombre_est}")
+                        print(f"ÉXITO con estrategia: {nombre_est}")
                         return info
             except Exception as e:
-                print(f"Fallo en estrategia [{nombre_est}]: {str(e)}")
-                errores.append(str(e))
+                print(f"Fallo en [{nombre_est}]: {str(e)}")
+                errores.append(f"[{nombre_est}]: {str(e)}")
                 continue
-        raise Exception(errores[0] if errores else "No se pudo extraer el video.")
+        raise Exception(" | ".join(errores))
     finally:
         if cookie_temp:
             borrar_archivo(cookie_temp)
+
+def respaldo_pytubefix_info(url: str):
+    from pytubefix import YouTube
+    for cliente in ["WEB", "MWEB", "IOS", "TV", "ANDROID_VR"]:
+        try:
+            yt = YouTube(url, client=cliente)
+            return {
+                "titulo": yt.title or "Video de YouTube",
+                "miniatura": yt.thumbnail_url or "",
+                "duracion": yt.length or 0,
+                "plataforma": "YouTube",
+                "url_original": url
+            }
+        except Exception as e:
+            print(f"Fallo respaldo info [{cliente}]: {e}")
+            continue
+    raise Exception("No se pudo extraer con ningún motor.")
+
+def respaldo_pytubefix_descarga(url: str, file_id: str):
+    from pytubefix import YouTube
+    for cliente in ["WEB", "MWEB", "IOS", "TV", "ANDROID_VR"]:
+        try:
+            yt = YouTube(url, client=cliente)
+            stream = yt.streams.filter(progressive=True, file_extension="mp4").order_by("resolution").desc().first()
+            if not stream:
+                stream = yt.streams.filter(file_extension="mp4").first()
+            if stream:
+                ruta = stream.download(output_path=TEMP_DIR, filename=f"{file_id}.mp4")
+                return ruta, yt.title
+        except Exception as e:
+            print(f"Fallo respaldo descarga [{cliente}]: {e}")
+            continue
+    raise Exception("No se pudo descargar el archivo con el motor de respaldo.")
 
 @app.get("/")
 def estado_servidor():
@@ -108,11 +142,12 @@ async def obtener_info_video(request: VideoRequest):
         return JSONResponse(status_code=400, content={"detail": "URL vacía"})
 
     ydl_opts = {
-        "format": "bestvideo*+bestaudio/best",
-        "quiet": True,
-        "no_warnings": True,
+        "format": "bv*+ba/b",
+        "quiet": False,
+        "no_warnings": False,
         "noplaylist": True,
         "geo_bypass": True,
+        "ignore_no_formats_error": True,
     }
 
     try:
@@ -124,10 +159,15 @@ async def obtener_info_video(request: VideoRequest):
             "plataforma": info.get("extractor_key", "Web"),
             "url_original": url
         }
-    except Exception as e:
+    except Exception as e_ytdlp:
+        if "youtube.com" in url or "youtu.be" in url:
+            try:
+                return respaldo_pytubefix_info(url)
+            except Exception:
+                pass
         return JSONResponse(
             status_code=400,
-            content={"detail": f"No se pudo procesar el enlace: {str(e)}"}
+            content={"detail": f"No se pudo procesar el enlace: {str(e_ytdlp)}"}
         )
 
 @app.post("/api/preparar-archivo")
@@ -137,12 +177,12 @@ async def preparar_archivo(request: VideoRequest):
     output_template = os.path.join(TEMP_DIR, f"{file_id}.%(ext)s")
 
     ydl_opts = {
-        "format": "bestvideo*[height<=1080]+bestaudio/best[height<=1080]/bestvideo*+bestaudio/best",
+        "format": "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b",
         "merge_output_format": "mp4",
         "outtmpl": output_template,
         "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
+        "quiet": False,
+        "no_warnings": False,
         "geo_bypass": True,
         "postprocessors": [{
             "key": "FFmpegVideoRemuxer",
@@ -151,8 +191,16 @@ async def preparar_archivo(request: VideoRequest):
     }
 
     try:
-        info = ejecutar_ytdlp(url, ydl_opts, descargar=True)
-        titulo_limpio = limpiar_nombre(info.get("title", "Video_MP4"))
+        try:
+            info = ejecutar_ytdlp(url, ydl_opts, descargar=True)
+            titulo_limpio = limpiar_nombre(info.get("title", "Video_MP4"))
+        except Exception as e_primario:
+            if "youtube.com" in url or "youtu.be" in url:
+                print("Activando motor de respaldo pytubefix para la descarga...")
+                _, titulo_raw = respaldo_pytubefix_descarga(url, file_id)
+                titulo_limpio = limpiar_nombre(titulo_raw)
+            else:
+                raise e_primario
 
         archivo_final = os.path.join(TEMP_DIR, f"{file_id}.mp4")
         if not os.path.exists(archivo_final):
