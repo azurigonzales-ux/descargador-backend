@@ -2,6 +2,8 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
+from urllib.parse import quote
+import unicodedata
 import yt_dlp
 import os
 import uuid
@@ -24,8 +26,13 @@ class VideoRequest(BaseModel):
     url: str
 
 def limpiar_nombre(titulo: str) -> str:
-    limpio = re.sub(r'[\\/*?:"<>|]', "", titulo)
-    limpio = limpio.strip()[:80]
+    """Elimina emojis, notas musicales (♪) y símbolos que rompen las cabeceras HTTP."""
+    if not titulo:
+        return "video_descargado"
+    normalizado = unicodedata.normalize("NFKD", str(titulo))
+    solo_ascii = normalizado.encode("ascii", "ignore").decode("ascii")
+    limpio = re.sub(r'[\\/*?:"<>|#\r\n\t]', "", solo_ascii)
+    limpio = re.sub(r"\s+", " ", limpio).strip()[:80]
     return limpio if limpio else "video_descargado"
 
 def obtener_cookie_temp():
@@ -49,14 +56,14 @@ def borrar_archivo(ruta: str):
 def ejecutar_ytdlp(url: str, opciones_base: dict, descargar: bool):
     cookie_temp = obtener_cookie_temp()
     
-    # Habilitar explícitamente Deno y Node para que yt-dlp descifre los formatos MP4 de YouTube
+    # Habilitar explícitamente Deno y Node para descifrar los formatos MP4
     opciones_base["js_runtimes"] = {"deno": {}, "node": {}}
     opciones_base["remote_components"] = ["ejs:github"]
 
     estrategias = []
 
     if cookie_temp:
-        # Estrategia 1: Cookies + clientes Web Safari / TV / Creator (evitan bloqueo de formato)
+        # Estrategia 1: Cookies + clientes Web Safari / TV / Creator
         opts_1 = opciones_base.copy()
         opts_1["cookiefile"] = cookie_temp
         opts_1["extractor_args"] = {
@@ -66,7 +73,7 @@ def ejecutar_ytdlp(url: str, opciones_base: dict, descargar: bool):
         }
         estrategias.append(("Cookies + Multi-Cliente JS", opts_1))
 
-        # Estrategia 2: Cookies directo (ideal para X/Twitter, TikTok, Instagram, Facebook)
+        # Estrategia 2: Cookies estándar (ideal para X/Twitter, TikTok, Instagram, Facebook)
         opts_2 = opciones_base.copy()
         opts_2["cookiefile"] = cookie_temp
         estrategias.append(("Cookies Estándar", opts_2))
@@ -231,11 +238,16 @@ async def bajar_archivo(file_name: str, nombre: str = "Video.mp4", background_ta
     if background_tasks:
         background_tasks.add_task(borrar_archivo, ruta_segura)
 
+    # Sanitizar el nombre en ASCII puro y codificar versión UTF-8 segura para cabeceras HTTP
+    base_nombre = nombre[:-4] if nombre.lower().endswith(".mp4") else nombre
+    nombre_ascii = f"{limpiar_nombre(base_nombre)}.mp4"
+    nombre_utf8 = quote(f"{base_nombre}.mp4")
+
     return FileResponse(
         path=ruta_segura,
         media_type="application/octet-stream",
-        filename=nombre,
+        filename=nombre_ascii,
         headers={
-            "Content-Disposition": f'attachment; filename="{nombre}"'
+            "Content-Disposition": f"attachment; filename=\"{nombre_ascii}\"; filename*=UTF-8''{nombre_utf8}"
         }
     )
