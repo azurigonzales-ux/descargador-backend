@@ -9,9 +9,10 @@ import os
 
 app = FastAPI()
 
+# Permite que solo tu Vercel se conecte con este backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=["https://descargador-frontend.vercel.app"], # <-- AQUÍ ESTÁ EL CAMBIO CLAVE
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
